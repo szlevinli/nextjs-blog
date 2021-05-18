@@ -1,50 +1,46 @@
-import { sort } from 'fp-ts/Array';
-import { pipe } from 'fp-ts/function';
 import {
-  apS,
-  bind,
-  bindTo,
-  chain,
-  Do,
-  flap,
-  flatten,
-  IO,
-  map,
-  of,
-  traverseArray,
-} from 'fp-ts/IO';
-import { contramap as contramapOrd, reverse } from 'fp-ts/Ord';
-import { Ord as strOrd } from 'fp-ts/string';
+  array as Ary,
+  function as Fun,
+  io as IO,
+  ord as Ord,
+  string as Str,
+  task as T,
+} from 'fp-ts';
 import fs from 'fs';
 import matter from 'gray-matter';
 import path from 'path';
 import R from 'ramda';
+import remark from 'remark';
+import html from 'remark-html';
+import { VFile } from 'vfile';
 
-export type PostsData = matter.GrayMatterFile<string> & { id: string };
+export type PostsData = Omit<matter.GrayMatterFile<string>, 'orig'> & {
+  id: string;
+};
 
 //
 // defined
 //
 
-const getCwd = of(process.cwd());
+const getCwd = IO.of(process.cwd());
 
 const getFileName = (ext: RegExp) => (fileName: string) =>
-  of(fileName.replace(ext, ''));
+  IO.of(fileName.replace(ext, ''));
 const getFileNameForMdFile = getFileName(/\.md$/);
 
 const getFullPath = (dirPath: string) => (filePath: string) =>
-  of(path.join(dirPath, filePath));
+  IO.of(path.join(dirPath, filePath));
 
-const getFileNamesOfDir = (dir: string) => of(fs.readdirSync(dir));
+const getFileNamesOfDir = (dir: string) => IO.of(fs.readdirSync(dir));
 
-const getFileContents = (file: string) => of(fs.readFileSync(file, 'utf-8'));
+const getFileContents = (file: string) => IO.of(fs.readFileSync(file, 'utf-8'));
 
-const getMatter = (fileContent: string) => of(matter(fileContent));
+const getMatter = (fileContent: string) => IO.of(matter(fileContent));
 
-const sortByDate = pipe(
-  strOrd,
-  reverse,
-  contramapOrd((p: PostsData) => p.data.date)
+const sortByDate = Fun.pipe(
+  Str.Ord,
+  Ord.reverse,
+  Ord.contramap((p: PostsData) => p.data.date)
 );
 
 //
@@ -52,54 +48,74 @@ const sortByDate = pipe(
 //
 
 // const getFullPathForPosts = getFullPath(process.cwd())('posts');
-const getFullPathForPosts = pipe(
+const getFullPathForPosts = Fun.pipe(
   getCwd,
-  map(getFullPath),
-  flap('posts'),
-  flatten
+  IO.map(getFullPath),
+  IO.flap('posts'),
+  IO.flatten
 );
 
 const getFullPathFileNameForPosts = (fileName: string) =>
-  pipe(getFullPathForPosts, map(getFullPath), flap(fileName), flatten);
-
-const fileNameToMatter = (fileName: string): IO<PostsData> =>
-  pipe(
-    getFullPathFileNameForPosts(fileName),
-    chain(getFileContents),
-    chain(getMatter),
-    apS('id', getFileNameForMdFile(fileName))
+  Fun.pipe(
+    getFullPathForPosts,
+    IO.map(getFullPath),
+    IO.flap(fileName),
+    IO.flatten
   );
 
-const getFileNamesForPosts = pipe(
+const fileNameToMatter = (fileName: string): IO.IO<PostsData> =>
+  Fun.pipe(
+    getFullPathFileNameForPosts(fileName),
+    IO.chain(getFileContents),
+    IO.chain(getMatter),
+    IO.map(R.omit(['orig'])),
+    IO.apS('id', getFileNameForMdFile(fileName))
+  );
+
+const getFileNamesForPosts = Fun.pipe(
   getFullPathForPosts,
-  chain(getFileNamesOfDir)
+  IO.chain(getFileNamesOfDir)
 );
 
 const fileNameToId = (fileName: string) =>
-  pipe(
-    Do,
-    bind('id', () => getFileNameForMdFile(fileName)),
-    bindTo('params')
+  Fun.pipe(
+    IO.Do,
+    IO.bind('id', () => getFileNameForMdFile(fileName)),
+    IO.bindTo('params')
+  );
+
+const md2Html =
+  (md: string): T.Task<VFile> =>
+  () =>
+    remark().use(html).process(md);
+
+const getPostDataIO = (id: string) =>
+  Fun.pipe(
+    getFullPathFileNameForPosts(`${id}.md`),
+    IO.chain(getFileContents),
+    IO.chain(getMatter),
+    IO.map(R.objOf('matter')),
+    IO.bind('data', ({ matter }) => IO.of(matter.data)),
+    IO.bind('id', () => IO.of(id)),
+    T.fromIO,
+    T.bind('contentHtml', ({ matter }) =>
+      Fun.pipe(matter.content, md2Html, T.map(String))
+    ),
+    T.map(R.omit(['matter']))
   );
 
 //
 // exports
 //
 
-export const getSortedPostsData = pipe(
+export const getSortedPostsData = Fun.pipe(
   getFileNamesForPosts,
-  chain(traverseArray(fileNameToMatter)),
-  map(sort(sortByDate))
+  IO.chain(IO.traverseArray(fileNameToMatter)),
+  IO.map(Ary.sort(sortByDate))
 );
 
-export const getAllPostIds: IO<readonly { params: { readonly id: string } }[]> =
-  pipe(getFileNamesForPosts, chain(traverseArray(fileNameToId)));
+export const getAllPostIds: IO.IO<
+  readonly { params: { readonly id: string } }[]
+> = Fun.pipe(getFileNamesForPosts, IO.chain(IO.traverseArray(fileNameToId)));
 
-export const getPostData = (id: string) =>
-  pipe(
-    getFullPathFileNameForPosts(`${id}.md`),
-    chain(getFileContents),
-    chain(getMatter),
-    map(R.pick(['data'])),
-    bind('id', () => () => id)
-  )();
+export const getPostData = (id: string) => getPostDataIO(id)();
